@@ -26,8 +26,13 @@ _DEFAULTS: dict[str, Any] = {
 def load_config(path: str | Path) -> tuple[list[JobConfig], AlertDispatcher]:
     """Parse a TOML config file and return job configs + alert dispatcher."""
     path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
     with path.open("rb") as fh:
-        raw = tomllib.load(fh)
+        try:
+            raw = tomllib.load(fh)
+        except Exception as exc:
+            raise ValueError(f"Failed to parse config file {path}: {exc}") from exc
 
     dispatcher = _build_dispatcher(raw.get("alerts", {}))
     jobs = [_build_job(j) for j in raw.get("jobs", [])]
@@ -37,6 +42,9 @@ def load_config(path: str | Path) -> tuple[list[JobConfig], AlertDispatcher]:
 
 
 def _build_job(raw: dict[str, Any]) -> JobConfig:
+    for required in ("name", "schedule"):
+        if required not in raw:
+            raise KeyError(f"Job config missing required field: '{required}'")
     return JobConfig(
         name=raw["name"],
         schedule=raw["schedule"],
@@ -58,6 +66,9 @@ def _build_dispatcher(raw: dict[str, Any]) -> AlertDispatcher:
 
     smtp_cfg = raw.get("smtp")
     if smtp_cfg:
+        for required in ("host", "sender", "recipients"):
+            if required not in smtp_cfg:
+                raise KeyError(f"SMTP config missing required field: '{required}'")
         channels.append(
             SmtpChannel(
                 host=smtp_cfg["host"],
