@@ -1,84 +1,60 @@
-"""YAML/TOML configuration loader for cronwatch."""
+"""Load cronwatch configuration from a YAML file."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 try:
-    import tomllib  # Python 3.11+
+    import yaml
 except ImportError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
+    yaml = None  # type: ignore[assignment]
 
-from cronwatch.alerts import AlertDispatcher, LogChannel, SmtpChannel
+from cronwatch.alerts import AlertChannel, Dispatcher, LogChannel
 from cronwatch.job import JobConfig
+from cronwatch.webhook_builder import build_webhook_channel
 
 logger = logging.getLogger(__name__)
 
-_DEFAULTS: dict[str, Any] = {
-    "drift_threshold_percent": 20.0,
-    "silence_threshold_seconds": 3600,
-    "expected_duration_seconds": None,
-}
 
+def load_config(path: str | Path) -> tuple[List[JobConfig], Dispatcher]:
+    """Parse *path* and return (jobs, dispatcher)."""
+    if yaml is None:  # pragma: no cover
+        raise RuntimeError("PyYAML is required to load configuration files")
 
-def load_config(path: str | Path) -> tuple[list[JobConfig], AlertDispatcher]:
-    """Parse a TOML config file and return job configs + alert dispatcher."""
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
-    with path.open("rb") as fh:
-        try:
-            raw = tomllib.load(fh)
-        except Exception as exc:
-            raise ValueError(f"Failed to parse config file {path}: {exc}") from exc
+    raw: Dict[str, Any] = yaml.safe_load(Path(path).read_text()) or {}
 
-    dispatcher = _build_dispatcher(raw.get("alerts", {}))
     jobs = [_build_job(j) for j in raw.get("jobs", [])]
-
-    logger.info("Loaded %d job(s) from %s", len(jobs), path)
+    dispatcher = _build_dispatcher(raw.get("alerts", {}))
     return jobs, dispatcher
 
 
-def _build_job(raw: dict[str, Any]) -> JobConfig:
-    for required in ("name", "schedule"):
-        if required not in raw:
-            raise KeyError(f"Job config missing required field: '{required}'")
+def _build_job(cfg: Dict[str, Any]) -> JobConfig:
     return JobConfig(
-        name=raw["name"],
-        schedule=raw["schedule"],
-        command=raw.get("command", ""),
-        drift_threshold_percent=float(
-            raw.get("drift_threshold_percent", _DEFAULTS["drift_threshold_percent"])
-        ),
-        silence_threshold_seconds=int(
-            raw.get("silence_threshold_seconds", _DEFAULTS["silence_threshold_seconds"])
-        ),
-        expected_duration_seconds=raw.get(
-            "expected_duration_seconds", _DEFAULTS["expected_duration_seconds"]
-        ),
+        name=cfg["name"],
+        schedule=cfg["schedule"],
+        max_drift_seconds=int(cfg.get("max_drift_seconds", 300)),
+        silent_failure_multiplier=float(cfg.get("silent_failure_multiplier", 2.0)),
     )
 
 
-def _build_dispatcher(raw: dict[str, Any]) -> AlertDispatcher:
-    channels = [LogChannel()]
+def _build_dispatcher(cfg: Dict[str, Any]) -> Dispatcher:
+    channels: List[AlertChannel] = []
 
-    smtp_cfg = raw.get("smtp")
-    if smtp_cfg:
-        for required in ("host", "sender", "recipients"):
-            if required not in smtp_cfg:
-                raise KeyError(f"SMTP config missing required field: '{required}'")
-        channels.append(
-            SmtpChannel(
-                host=smtp_cfg["host"],
-                port=int(smtp_cfg.get("port", 465)),
-                sender=smtp_cfg["sender"],
-                recipients=smtp_cfg["recipients"],
-                username=smtp_cfg.get("username"),
-                password=smtp_cfg.get("password"),
-                use_tls=smtp_cfg.get("use_tls", True),
-            )
-        )
+    # Always include the log channel so there is at least one output
+    channels.append(LogChannel())
 
-    return AlertDispatcher(channels=channels)
+    for ch_cfg in cfg.get("channels", []):
+        kind = ch_cfg.get("type", "").lower()
+        if kind == "webhook":
+            try:
+                channels.append(build_webhook_channel(ch_cfg))
+            except ValueError as exc:
+                logger.warning("Skipping invalid webhook channel config: %s", exc)
+        elif kind == "log":
+            pass  # already added above
+        else:
+            logger.warning("Unknown alert channel type: %r — ignoring", kind)
+
+    return Dispatcher(channels=channels)
