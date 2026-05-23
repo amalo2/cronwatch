@@ -54,6 +54,12 @@ def test_record_execution_updates_state(watcher):
     assert before != after
 
 
+def test_record_execution_stores_duration(watcher):
+    """record_execution should persist the reported duration on the job state."""
+    watcher.record_execution("backup", 7.5)
+    assert watcher._states["backup"].last_duration == 7.5
+
+
 def test_record_execution_unknown_job_logs_warning(watcher, caplog):
     import logging
 
