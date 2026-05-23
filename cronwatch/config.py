@@ -1,60 +1,55 @@
-"""Load cronwatch configuration from a YAML file."""
-
-from __future__ import annotations
+"""Load and validate cronwatch configuration from a YAML file."""
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover
-    yaml = None  # type: ignore[assignment]
+import yaml
 
-from cronwatch.alerts import AlertChannel, Dispatcher, LogChannel
+from cronwatch.alerts import AlertChannel, Dispatcher
+from cronwatch.email_builder import build_email_channel
 from cronwatch.job import JobConfig
 from cronwatch.webhook_builder import build_webhook_channel
 
 logger = logging.getLogger(__name__)
 
 
-def load_config(path: str | Path) -> tuple[List[JobConfig], Dispatcher]:
-    """Parse *path* and return (jobs, dispatcher)."""
-    if yaml is None:  # pragma: no cover
-        raise RuntimeError("PyYAML is required to load configuration files")
+def load_config(path: str | Path) -> Dict[str, Any]:
+    """Parse YAML config and return a dict with 'jobs' and 'dispatcher'."""
+    with open(path) as fh:
+        raw = yaml.safe_load(fh) or {}
 
-    raw: Dict[str, Any] = yaml.safe_load(Path(path).read_text()) or {}
-
-    jobs = [_build_job(j) for j in raw.get("jobs", [])]
+    jobs = {name: _build_job(name, spec) for name, spec in raw.get("jobs", {}).items()}
     dispatcher = _build_dispatcher(raw.get("alerts", {}))
-    return jobs, dispatcher
+
+    return {"jobs": jobs, "dispatcher": dispatcher}
 
 
-def _build_job(cfg: Dict[str, Any]) -> JobConfig:
+def _build_job(name: str, spec: Dict[str, Any]) -> JobConfig:
     return JobConfig(
-        name=cfg["name"],
-        schedule=cfg["schedule"],
-        max_drift_seconds=int(cfg.get("max_drift_seconds", 300)),
-        silent_failure_multiplier=float(cfg.get("silent_failure_multiplier", 2.0)),
+        name=name,
+        schedule=spec["schedule"],
+        expected_duration_s=spec.get("expected_duration_s"),
+        drift_threshold_s=spec.get("drift_threshold_s", 300),
+        silence_threshold_s=spec.get("silence_threshold_s", 3600),
     )
 
 
-def _build_dispatcher(cfg: Dict[str, Any]) -> Dispatcher:
-    channels: List[AlertChannel] = []
+def _build_dispatcher(alert_cfg: Dict[str, Any]) -> "Dispatcher":
+    from cronwatch.alerts import Dispatcher  # local to avoid circular import
 
-    # Always include the log channel so there is at least one output
-    channels.append(LogChannel())
+    channels: list[AlertChannel] = []
 
-    for ch_cfg in cfg.get("channels", []):
-        kind = ch_cfg.get("type", "").lower()
-        if kind == "webhook":
-            try:
+    for ch_cfg in alert_cfg.get("channels", []):
+        kind = ch_cfg.get("type", "")
+        try:
+            if kind == "webhook":
                 channels.append(build_webhook_channel(ch_cfg))
-            except ValueError as exc:
-                logger.warning("Skipping invalid webhook channel config: %s", exc)
-        elif kind == "log":
-            pass  # already added above
-        else:
-            logger.warning("Unknown alert channel type: %r — ignoring", kind)
+            elif kind == "email":
+                channels.append(build_email_channel(ch_cfg))
+            else:
+                logger.warning("Unknown alert channel type '%s'; skipping.", kind)
+        except (ValueError, KeyError) as exc:
+            logger.error("Failed to build channel of type '%s': %s", kind, exc)
 
     return Dispatcher(channels=channels)
